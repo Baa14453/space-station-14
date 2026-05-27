@@ -1,18 +1,17 @@
 using System.Linq;
-using Content.Server.DeviceNetwork.Components;
-using Content.Shared.DeviceNetwork;
 using Content.Shared.DeviceNetwork.Components;
+using Content.Shared.DeviceNetwork.Events;
 using Content.Shared.DeviceNetwork.Systems;
-using Content.Shared.Interaction;
 using JetBrains.Annotations;
 using Robust.Shared.Map.Events;
 
 namespace Content.Server.DeviceNetwork.Systems;
 
 [UsedImplicitly]
-public sealed class DeviceListSystem : SharedDeviceListSystem
+public sealed partial class DeviceListSystem : SharedDeviceListSystem
 {
-    [Dependency] private readonly NetworkConfiguratorSystem _configurator = default!;
+    [Dependency] private NetworkConfiguratorSystem _configurator = default!;
+    [Dependency] private EntityQuery<DeviceNetworkComponent> _deviceNetworkQuery = default!;
 
     public override void Initialize()
     {
@@ -20,7 +19,7 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
         SubscribeLocalEvent<DeviceListComponent, ComponentShutdown>(OnShutdown);
         SubscribeLocalEvent<DeviceListComponent, BeforeBroadcastAttemptEvent>(OnBeforeBroadcast);
         SubscribeLocalEvent<DeviceListComponent, BeforePacketSentEvent>(OnBeforePacketSent);
-        SubscribeLocalEvent<BeforeSaveEvent>(OnMapSave);
+        SubscribeLocalEvent<BeforeSerializationEvent>(OnMapSave);
     }
 
     private void OnShutdown(EntityUid uid, DeviceListComponent component, ComponentShutdown args)
@@ -30,10 +29,9 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
             _configurator.OnDeviceListShutdown(conf, (uid, component));
         }
 
-        var query = GetEntityQuery<DeviceNetworkComponent>();
         foreach (var device in component.Devices)
         {
-            if (query.TryGetComponent(device, out var comp))
+            if (_deviceNetworkQuery.TryGetComponent(device, out var comp))
                 comp.DeviceLists.Remove(uid);
         }
         component.Devices.Clear();
@@ -124,19 +122,18 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
         Dirty(list);
     }
 
-    private void OnMapSave(BeforeSaveEvent ev)
+    private void OnMapSave(BeforeSerializationEvent ev)
     {
         List<EntityUid> toRemove = new();
-        var query = GetEntityQuery<TransformComponent>();
         var enumerator = AllEntityQuery<DeviceListComponent, TransformComponent>();
         while (enumerator.MoveNext(out var uid, out var device, out var xform))
         {
-            if (xform.MapUid != ev.Map)
+            if (!ev.MapIds.Contains(xform.MapID))
                 continue;
 
             foreach (var ent in device.Devices)
             {
-                if (!query.TryGetComponent(ent, out var linkedXform))
+                if (!TryComp(ent, out TransformComponent? linkedXform))
                 {
                     // Entity was deleted.
                     // TODO remove these on deletion instead of on-save.
@@ -144,7 +141,10 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
                     continue;
                 }
 
-                if (linkedXform.MapUid == ev.Map)
+                // This is assuming that **all** of the map is getting saved.
+                // Which is not necessarily true.
+                // AAAAAAAAAAAAAA
+                if (ev.MapIds.Contains(linkedXform.MapID))
                     continue;
 
                 toRemove.Add(ent);
@@ -189,7 +189,6 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
             return DeviceListUpdateResult.TooManyDevices;
         }
 
-        var query = GetEntityQuery<DeviceNetworkComponent>();
         var oldDevices = deviceList.Devices.ToList();
         foreach (var device in oldDevices)
         {
@@ -197,13 +196,13 @@ public sealed class DeviceListSystem : SharedDeviceListSystem
                 continue;
 
             deviceList.Devices.Remove(device);
-            if (query.TryGetComponent(device, out var comp))
+            if (_deviceNetworkQuery.TryGetComponent(device, out var comp))
                 comp.DeviceLists.Remove(uid);
         }
 
         foreach (var device in newDevices)
         {
-            if (!query.TryGetComponent(device, out var comp))
+            if (!_deviceNetworkQuery.TryGetComponent(device, out var comp))
                 continue;
 
             if (!deviceList.Devices.Add(device))
